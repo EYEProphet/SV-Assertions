@@ -37,7 +37,7 @@ module top();
                 correct, finished;
 
     logic [7:0][15:0] stackOut;
-    logic startStackOverflow, startDoneEarly, startAddOverflow, 
+    logic startStackOverflow, startDoneEarly, startAddOverflow, twoStarts,
           startSubOverflow;
 
     //calculator instantiation
@@ -54,11 +54,16 @@ module top();
       rand bit [15:0] calcOperation;
       rand bit [15:0] tooManyEntries;
       rand bit [15:0] numOfEntries;
+      rand bit [15:0] notOperation;
 
       constraint operation {calcOperation inside {16'h1, 16'h2, 16'h4, 16'h8, 
                                                   16'h10, 16'h20};}
       constraint manyEntries {tooManyEntries inside {[9:20]};}
       constraint numEntries {numOfEntries inside {[1:7]};}
+      /* https://www.chipverify.com/systemverilog/systemverilog-constraint-
+         examples*/
+      constraint invalidOp {!(notOperation inside {16'h1, 16'h2, 16'h4, 16'h8, 
+                                                  16'h10, 16'h20});}
 
     endclass: calculatorInputs
 
@@ -71,7 +76,18 @@ module top();
       reset_N <= 1;
       startStackOverflow <= 0;
       startDoneEarly <= 0;
+      startAddOverflow <= 0;
+      twoStarts <= 0;
+      startSubOverflow <= 0;
     endtask: doReset
+
+    task enterEntries (logic [15:0] amount);
+      for (int num = 0; num < amount; num++) begin
+        @(posedge clock);
+        data.op <= ENTER;
+        data.payload <= calc.calcPayload; // Random payload
+      end
+    endtask: enterEntries
 
     // Task to push more than 8 entries onto the stack
     task pushManyEntriesOntoStack;
@@ -97,82 +113,124 @@ module top();
       data.op <= START;
       data.payload <= calc.calcPayload; // Random payload
       startDoneEarly <= 1;
-      for (int num = 0; num < calc.numOfEntries; num++) begin
-        @(posedge clock);
-        data.op <= ENTER;
-        data.payload <= calc.calcPayload; // Random payload
-      end
+      enterEntries(calc.numOfEntries);
       @(posedge clock);
       data.op <= DONE;
       data.payload <= 16'h1;
       @(posedge clock);
       startDoneEarly <= 0;
+      @(posedge clock);
 
     endtask: giveDoneTooEarly
 
-    task performAddOverflow
+    task performAddOverflow;
       @(posedge clock);
       data.op <= START;
-      data.payload <= 16'hFFFF;
+      data.payload <= 16'h8000;
       startAddOverflow <= 1;
       @(posedge clock);
       data.op <= ENTER;
-      data.payload <= 16'h1;
+      data.payload <= 16'h8000;
       @(posedge clock);
       data.op <= ARITH_OP;
       data.payload <= 16'h1;
+      enterEntries(calc.numOfEntries);
       @(posedge clock);
       data.op <= DONE;
       data.payload <= 16'h1;
       startAddOverflow <= 0;
-    endtask: performSubtractOverflow
+    endtask: performAddOverflow
 
-    task performSubOverflow
+    task performSubOverflow;
       @(posedge clock);
       data.op <= START;
       data.payload <= 16'h1;
       startSubOverflow <= 1;
       @(posedge clock);
       data.op <= ENTER;
-      data.payload <= 16'h0;
+      data.payload <= 16'h8000;
       @(posedge clock);
       data.op <= ARITH_OP;
       data.payload <= 16'h2;
+      enterEntries(calc.numOfEntries);
       @(posedge clock);
       data.op <= DONE;
       data.payload <= 16'h1;
       startSubOverflow <= 0;
     endtask: performSubOverflow
 
-    //this task should contain your testbench
-    task runTestbench(input int phase);
-      begin
-        /* * * * * * * * * * * *
-         * YOUR TESTBENCH HERE *
-         * * * * * * * * * * * */
-        doReset();
-        // Test for stackOverflow signal
-        pushManyEntriesOntoStack();
-        doReset();
+    function checkNumOverflow(logic [15:0] num1, logic [15:0] num2, 
+                               logic add, logic [15:0] result);
+      if (add && num1[15] == num2[15] && result[15] != num1[15])
+        return 1;
+      else if (~add && ((num1[15] == 0 && num2[15] == 1 && result[15] == 0) ||
+               (num1[15] == 1 && num2[15] == 0 && result[15] == 1)))
+        return 1;
+        
+      return 0;
 
-        // Test for unexpectedDone signal
-        giveDoneTooEarly();
-        doReset();
+    endfunction: checkNumOverflow
 
-        // Test for dataOverflow signal
-        performAddOverflow();
-        doReset();
-        performSubOverflow();
-        doReset();
+    task giveOnlyOneEntry (input logic [15:0] oper);
+      @(posedge clock);
+      data.op <= START;
+      data.payload <= calc.calcPayload;
+      @(posedge clock);
+      data.op <= ARITH_OP;
+      data.payload <= oper;
+      enterEntries(calc.numOfEntries);
+      @(posedge clock);
+      data.op <= DONE;
+      data.payload <= 16'h1;
+    endtask
 
-        //test for functional "correct", "finished", and ADD
-        @(posedge clock);
+    task giveStartAgain;
+      @(posedge clock);
+      data.op <= START;
+      data.payload <= calc.calcPayload;
+      @(posedge clock);
+      data.op <= START;
+      data.payload <= calc.calcPayload;
+      twoStarts <= 1;
+      enterEntries(calc.numOfEntries);
+      @(posedge clock);
+      data.op <= DONE;
+      data.payload <= 16'h1;
+      twoStarts <= 0;
+    endtask: giveStartAgain
+
+    task tryMultipleCommands;
+      for (int command1 = 1; command1 < 16'h20; command1 *= 2) begin
+        for (int command2 = command1*2; command2 < 16'h20; command2 *= 2) begin
+          @(posedge clock);
+          data.op <= START;
+          data.payload <= calc.calcPayload;
+          enterEntries(calc.numOfEntries);
+          @(posedge clock);
+          data.op <= ARITH_OP;
+          data.payload <= (command1 | command2);
+          @(posedge clock);
+          data.op <= DONE;
+          data.payload <= 16'h1;
+          doReset();
+        end
+      end
+    endtask: tryMultipleCommands
+
+    function checkPayload (logic [15:0] payload);
+      if (payload != 16'h1 && payload != 16'h2 && payload != 16'h4 && 
+          payload != 16'h8 && payload != 16'h10 && payload != 16'h20) begin
+        return 0;
+      end
+      return 1;
+    endfunction: checkPayload
+
+    task sendCorrectSequence;
+      @(posedge clock);
         data.op <= START;
         data.payload <= 16'h0005; // stack: 5
         @(posedge clock);
-        data.op <= ENTER;
-        data.payload <= 16'h0003; // stack: 3 5
-        @(posedge clock);
+        enterEntries(3);
         data.op <= ARITH_OP;
         data.payload <= 16'h1; // add
         @(posedge clock);
@@ -183,6 +241,76 @@ module top();
         assert(finished);
         assert(result == 8)
           else $display("result is %d", result);
+    endtask: sendCorrectSequence
+
+    task performOps;
+      for (int command1 = 1; command1 < 16'h20; command1 *= 2) begin
+        data.op <= START;
+        data.payload <= calc.calcPayload; // Random payload
+        @(posedge clock);
+        data.op <= ENTER;
+        data.payload <= calc.calcPayload; // Random payload
+        @(posedge clock);
+        data.op <= ARITH_OP;
+        data.payload <= command1;
+        @(posedge clock);
+        data.op <= DONE;
+        data.payload <= 16'h1;
+        doReset();
+      end
+    endtask: performOps
+
+    //this task should contain your testbench
+    task runTestbench(input int phase);
+      begin
+        /* * * * * * * * * * * *
+         * YOUR TESTBENCH HERE *
+         * * * * * * * * * * * */
+        doReset();
+        // Test for stackOverflow signal
+        // pushManyEntriesOntoStack();
+        // doReset();
+
+        // // Test for unexpectedDone signal
+        // giveDoneTooEarly();
+        // doReset();
+
+        // // Test for dataOverflow signal
+        // performAddOverflow();
+        // doReset();
+        // performSubOverflow();
+        // doReset();
+
+        // Test for protocolError signal
+        // <Not enough items on the stack to do operation>
+        // giveOnlyOneEntry(16'h1);
+        // doReset();
+        // giveOnlyOneEntry(16'h2);
+        // doReset();
+        // giveOnlyOneEntry(16'h4);
+        // doReset();
+        // giveOnlyOneEntry(16'h8);
+        // doReset();
+        // <START appears again before DONE>
+        // giveStartAgain();
+        // doReset();
+        // <Never 0 entries on stack between START and DONE>
+        // giveOnlyOneEntry(16'h20);
+        // doReset();
+        // <The command is invalid>
+        // giveOnlyOneEntry(calc.notOperation);
+        // doReset();
+        // tryMultipleCommands();
+        // doReset();
+
+        // Test for functional "correct", "finished", and ADD
+        // sendCorrectSequence();
+        // doReset();
+
+        // Test for all operations
+        performOps();
+
+
       end
     endtask
 
@@ -198,17 +326,28 @@ module top();
                                               stackOverflow;
     endproperty: checkStackOverflow
 
-    property checkStackOverflowUntilDone;
-      @(posedge clock) (stackOverflow and (data.op == DONE)) |=> ~stackOverflow;
-    endproperty: checkStackOverflowUntilDone
+    property stackOverflowBeforeDone;
+      @(posedge clock) stackOverflow |-> (stackOverflow) throughout 
+                                         (data.op != DONE);
+    endproperty: stackOverflowBeforeDone
+
+    property stackOverflowAfterDone;
+      @(posedge clock) (data.op == DONE) |-> (~stackOverflow) throughout 
+                                             (data.op == DONE);
+    endproperty: stackOverflowAfterDone
 
     correctStackOverflow: assert property (checkStackOverflow)
             else
-              $error("Expected stackOverflow to be asserted now\n");
+              $error("StackOverflow was not asserted or was asserted too early",
+                     "\n");
 
-    correctStackOverflowUntilDone: assert property (checkStackOverflowUntilDone)
+    checkStackOverflowBeforeDone: assert property (stackOverflowBeforeDone)
             else
-              $error("Expected stackOverflow to be asserted until done\n");
+              $error("StackOverflow was not asserted until done\n");
+
+    checkStackOverflowAfterDone: assert property (stackOverflowAfterDone)
+            else
+              $error("StackOverflow was asserted even though done happened\n");
 
 
     /* Concurrent assertions and properties to check that the unexpectedDone 
@@ -234,15 +373,171 @@ module top();
               $error("Expected unexpectedDone to not be asserted unless DONE", 
                      " was given early\n");
     
+
+    /* Concurrent assertions and properties to check that the dataOverflow 
+       signal is asserted when add or subtract causes the result to overflow
+       and is not asserted when those two operations do not cause anything to
+       overflow. Also making sure that dataOverflow is asserted until DONE */
+    sequence addOperation;
+      (data.op == ARITH_OP) and (data.payload == 8'h1);
+    endsequence: addOperation
+
+    sequence addOverflow;
+      addOperation and (checkNumOverflow(stackOut[0], stackOut[1], 1, 
+                                        (stackOut[1] + stackOut[0])));
+    endsequence: addOverflow
+
+    sequence subOperation;
+      (data.op == ARITH_OP) and (data.payload == 8'h2);
+    endsequence: subOperation
+
+    sequence subOverflow;
+      subOperation and (checkNumOverflow(stackOut[0], stackOut[1], 0, 
+                                        (stackOut[1] - stackOut[0])));
+    endsequence: subOverflow
+
+    sequence notAddOverflow;
+      addOperation and (!checkNumOverflow(stackOut[0], stackOut[1], 1, 
+                                        (stackOut[1] + stackOut[0])));
+    endsequence: notAddOverflow
+
+    sequence notSubOverflow;
+      subOperation and (!checkNumOverflow(stackOut[0], stackOut[1], 0, 
+                                        (stackOut[1] - stackOut[0])));
+    endsequence: notSubOverflow
+
+    property checkOverflow;
+      @(posedge clock) (addOverflow or subOverflow) |-> dataOverflow;
+    endproperty: checkOverflow
+
+    property checkNotOverflow;
+      @(posedge clock) (notAddOverflow or notSubOverflow) |-> ~dataOverflow;
+    endproperty: checkNotOverflow
+
+    property dataOverflowUntilDone;
+      @(posedge clock) dataOverflow |-> (dataOverflow) throughout 
+                                         (data.op != DONE);
+    endproperty: dataOverflowUntilDone
+
+    correctOverflow: assert property (checkOverflow)
+            else
+              $error("Expected dataOverflow to be asserted\n");
+
+    correctNotOverflow: assert property (checkNotOverflow)
+            else
+              $error("Expected dataOverflow to not be asserted\n");
     
-    property checkAddOverflow;
-      @(posedge clock) (checkAddOverflow) |=> dataOverflow
+    checkDataOverflowUntilDone: assert property (dataOverflowUntilDone)
+            else
+              $error("DataOverflow was not asserted until done\n");
 
-    endproperty: checkAddOverflow
 
-    property checkAddOverflow;
-      @(posedge clock) (checkSubOverflow) |=>
+    /* Concurrent assertions and properties to check that the protocol error is
+       asserted correctly for all 4 cases that can happen. */
+    sequence notValidArithOp;
+      (data.op == ARITH_OP) and ((data.payload != 16'h10) and 
+                                 (data.payload != 16'h20));
+    endsequence: notValidArithOp
+    
+    property notEnoughItems;
+      @(posedge clock) (data.op == START) ##1 notValidArithOp |-> protocolError; 
+    endproperty: notEnoughItems
 
-    endproperty: checkAddOverflow
+    property startAgain;
+      @(posedge clock) (twoStarts and (data.op == START)) |-> protocolError;
+    endproperty: startAgain
+
+    property zeroItemsOnStack;
+      @(posedge clock) (data.op == START) ##1 
+                       ((data.op == ARITH_OP) and (data.payload == 16'h20))
+                       |-> protocolError; 
+    endproperty: zeroItemsOnStack
+
+    property cannotUseCommand;
+      @(posedge clock) ((data.op == ARITH_OP) and (!checkPayload(data.payload)))
+                        |-> protocolError;
+    endproperty: cannotUseCommand
+
+    correctProtocolCase1: assert property (notEnoughItems)
+            else
+              $error("Expected protocolError to be asserted due to not enough", 
+                      " items on stack to perform operation\n");
+
+    correctProtocolCase2: assert property (startAgain)
+            else
+              $error("Expected protocolError to be asserted due to start being", 
+                      " asserted again before done\n");
+
+    correctProtocolCase3: assert property (zeroItemsOnStack)
+            else
+              $error("Expected protocolError to be asserted due zero items on", 
+                      " stack between START and DONE\n");
+
+    correctProtocolCase4: assert property (cannotUseCommand)
+            else
+              $error("Expected protocolError to be asserted due to invalid", 
+                      " command\n");
+    
+    property checkAdd;
+      @(posedge clock) (data.op == ARITH_OP and data.payload == 16'h1) |-> 
+                       ((stackOut[1] + stackOut[0]) == result);
+    endproperty: checkAdd
+
+    property checkSub;
+      @(posedge clock) (data.op == ARITH_OP and data.payload == 16'h2) |-> 
+                       ((stackOut[1] - stackOut[0]) == result);
+    endproperty: checkSub
+
+    property checkAnd;
+      @(posedge clock) (data.op == ARITH_OP and data.payload == 16'h4) |-> 
+                       ((stackOut[1] + stackOut[0]) == result);
+    endproperty: checkAnd
+
+    property checkSwap;
+      @(posedge clock) (data.op == ARITH_OP and data.payload == 16'h8) |-> 
+                       ((stackOut[1] + stackOut[0]) == result);
+    endproperty: checkSwap
+
+    property checkNegate;
+      @(posedge clock) (data.op == ARITH_OP and data.payload == 16'h10) |-> 
+                       ((stackOut[1] + stackOut[0]) == result);
+    endproperty: checkNegate
+
+    property checkPop;
+      @(posedge clock) (data.op == ARITH_OP and data.payload == 16'h20) |-> 
+                       ((stackOut[1] + stackOut[0]) == result);
+    endproperty: checkPop
+
+    correctAdd: assert property (checkAdd)
+            else
+              $error("From addition Expected: %h  Got %h", 
+                     (stackOut[1] + stackOut[0]), result);
+
+
+    // function checkForErrors();
+    //   if ((stackOverflow == 1) || (unexpectedDone == 1) || (protocolError == 1) 
+    //        || (dataOverflow == 1))
+    //     return 1;
+    //   return 0;
+    // endfunction: checkForErrors
+
+    // property checkCorrect;
+    //   @(posedge clock) ((data.op == START) ##1 
+    //                     (!checkForErrors() throughout (data.op != DONE))) 
+    //                     |=> data.op != DONE ##1 correct;
+    // endproperty: checkCorrect
+
+    // property checkFinish;
+    //   @(posedge clock) (data.op == START) ##[1:$] 
+    //                    ((data.op == DONE) and finished);
+    // endproperty: checkFinish
+
+    // rightCorrectSignal: assert property (checkCorrect)
+    //         else
+    //           $error("Expected correct signal to be asserted");
+
+    // correctFinishSignal: assert property (checkCorrect)
+    //         else
+    //           $error("Expected correct signal to be asserted");
 
 endmodule: top
